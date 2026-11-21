@@ -1,0 +1,65 @@
+name: Windows build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure (CMake, Visual Studio, x64)
+        run: cmake -S . -B build -A x64 -DPINKSTUDIO_ENABLE_ASIO=ON
+
+      - name: Build (Release)
+        run: cmake --build build --config Release --parallel
+
+      - name: Engine unit tests
+        run: |
+          ctest --test-dir build -C Release --output-on-failure
+          build\tests\Release\pinkstudio_tests.exe --report build\test-report.md
+
+      - name: Offline render check
+        run: build\tools\pinkrender\Release\pinkrender.exe --demo build\pinkstudio_demo.wav
+
+      - name: UI smoke test (headless screenshot)
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          $exe = "build\app\PinkStudio_artefacts\Release\PINKSTUDIO.exe"
+          $png = Join-Path $PWD "build\pinkstudio_ui.png"
+          $p = Start-Process -FilePath $exe -ArgumentList "--screenshot", "`"$png`"" -PassThru -Wait
+          if ($p.ExitCode -ne 0 -or -not (Test-Path $png)) { throw "UI smoke test failed (exit $($p.ExitCode))" }
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc /DAppVersion=0.1.0 /DBuildDir=..\build installer\PINKSTUDIO.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+
+      - name: Collect artifacts
+        run: |
+          New-Item -ItemType Directory -Force dist\PINKSTUDIO | Out-Null
+          Copy-Item build\app\PinkStudio_artefacts\Release\PINKSTUDIO.exe dist\PINKSTUDIO\
+          Copy-Item build\tools\pinkrender\Release\pinkrender.exe dist\PINKSTUDIO\
+          Copy-Item -Recurse docs dist\PINKSTUDIO\docs
+          Copy-Item build\test-report.md dist\
+          Copy-Item build\pinkstudio_demo.wav dist\
+          if (Test-Path build\pinkstudio_ui.png) { Copy-Item build\pinkstudio_ui.png dist\ }
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: PINKSTUDIO-windows-x64
+          path: dist/
+          if-no-files-found: error
